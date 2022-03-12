@@ -1,13 +1,40 @@
 import tensorflow.keras.models as km
 import tensorflow.keras.layers as kl
 import tensorflow.keras.optimizers as ko
+import numpy as np
 
 
-def create_hourglass_network(num_classes, num_stacks, num_filters, inres):
-    input = kl.Input(shape=(inres[0], inres[1], 3))
+class HourglassNetwork:
+    def __init__(self,
+                 num_classes: int,
+                 num_stacks: int,
+                 num_filters: int,
+                 in_shape: tuple[int, int],
+                 outers: tuple[int, int]) -> None:
+        self.inres = in_shape
+        self.outres = outers
+        self.model = create_hourglass_network(num_classes,
+                                              num_stacks,
+                                              num_filters,
+                                              in_shape)
+
+    def summary(self) -> None:
+        self.model.summary()
+
+    def fit(self, data_generator: int, dataset_size: int, batch_size: int, epochs: int) -> None:
+        self.model.fit(data_generator,
+                       steps_per_epoch=dataset_size//batch_size,
+                       epochs=epochs,
+                       verbose=1)
+
+    def predict(self, input: np.ndarray) -> np.ndarray:
+        return self.model.predict(input)[0]
+
+
+def create_hourglass_network(num_classes, num_stacks, num_filters, in_shape):
+    input = kl.Input(shape=in_shape)
 
     out_next_stage = Front(num_filters)(input)
-    ko.RMSprop
 
     outputs = []
     for _ in range(num_stacks):
