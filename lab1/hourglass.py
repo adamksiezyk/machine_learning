@@ -1,3 +1,4 @@
+from typing import Tuple
 import tensorflow.keras.models as km
 import tensorflow.keras.layers as kl
 import tensorflow.keras.optimizers as ko
@@ -9,8 +10,8 @@ class HourglassNetwork:
                  num_classes: int,
                  num_stacks: int,
                  num_filters: int,
-                 in_shape: tuple[int, int],
-                 outers: tuple[int, int]) -> None:
+                 in_shape: Tuple[int, int],
+                 outers: Tuple[int, int]) -> None:
         self.inres = in_shape
         self.outres = outers
         self.model = create_hourglass_network(num_classes,
