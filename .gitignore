@@ -4,6 +4,6 @@ __pycache__
 
 venv
 
-data/*
+lab1/data/*
 
 YCB-Video_data
