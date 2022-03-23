@@ -10,61 +10,68 @@ class HourglassNetwork:
                  num_classes: int,
                  num_stacks: int,
                  num_filters: int,
-                 in_shape: Tuple[int, int],
-                 outers: Tuple[int, int]) -> None:
-        self.inres = in_shape
-        self.outres = outers
+                 dim_in: Tuple[int, int],
+                 dim_out: Tuple[int, int]) -> None:
+        self.dim_in = dim_in
+        self.dim_out = dim_out
         self.model = create_hourglass_network(num_classes,
                                               num_stacks,
                                               num_filters,
-                                              in_shape)
+                                              dim_in,
+                                              dim_out)
+
+    def load(self, path: str) -> None:
+        self.model = km.load_model(path)
 
     def summary(self) -> None:
         self.model.summary()
 
     def fit(self, data_generator: int, dataset_size: int, batch_size: int, epochs: int):
         return self.model.fit(data_generator,
-                       steps_per_epoch=dataset_size//batch_size,
-                       epochs=epochs,
-                       verbose=1)
+                              steps_per_epoch=dataset_size//batch_size,
+                              epochs=epochs,
+                              verbose=1)
 
     def predict(self, input: np.ndarray) -> np.ndarray:
         return self.model.predict(input)[0]
 
 
-def create_hourglass_network(num_classes, num_stacks, num_filters, in_shape):
-    input = kl.Input(shape=in_shape)
+def create_hourglass_network(num_classes: int,
+                             num_stacks: int,
+                             num_filters: int,
+                             dim_in: Tuple[int, int],
+                             dim_out: Tuple[int, int]):
+    input = kl.Input(shape=(*dim_in, 1))
 
-    out_next_stage = Front(num_filters)(input)
-
-    outputs = []
-    for _ in range(num_stacks):
-        out_next_stage, out_to_loss = Hourglass(
-            num_classes, num_filters)(out_next_stage)
-        outputs.append(out_to_loss)
+    outputs = Hourglass(num_classes, num_filters, dim_in, dim_out)(input)
 
     model = km.Model(inputs=input, outputs=outputs)
-    model.compile(optimizer=ko.RMSprop(learning_rate=5e-4),
+    model.compile(optimizer="rmsprop",  # ko.RMSprop(learning_rate=5e-4),
                   loss="mean_squared_error",
                   metrics=["accuracy"])
 
     return model
 
 
-def Hourglass(num_classes, num_filters):
+def Hourglass(num_classes: int, num_filters: int, dim_in: Tuple[int, int], dim_out: Tuple[int, int]):
 
     def inner(x):
-        # Create left features , f1, f2, f4, and f8
-        left_features = LeftHalf(num_filters)(x)
+        # Front
+        front = Front(num_filters//4)(x)
+        dim_in_down = (dim_in[0]//4, dim_in[1]//4)
+        dim_out_down = (dim_out[0]//4, dim_out[1]//4)
+
+        # Create left features
+        left_features = LeftHalf(num_filters, dim_in_down)(front)
 
         # Create right features, connect with left features
-        rf1 = RightHalf(num_filters)(left_features)
+        right_features = RightHalf(num_filters, num_classes)(left_features)
 
         # add 1x1 conv with two heads, head_next_stage is sent to next stage
         # head_parts is used for intermediate supervision
-        out_next_stage, out_parts = Output(num_classes, num_filters)(x, rf1)
+        out = Output(num_classes, dim_out_down)(right_features)
 
-        return out_next_stage, out_parts
+        return out
 
     return inner
 
@@ -75,133 +82,97 @@ def Front(num_filters: int):
     # 3 residual
 
     def inner(x):
-        _x = kl.Conv2D(num_filters//4,
+        _x = kl.Conv2D(num_filters,
                        (7, 7),
                        (2, 2),
                        padding="same",
                        activation="relu",
                        data_format="channels_last")(x)
         _x = kl.BatchNormalization()(_x)
-
-        _x = ResidualBottleneck(num_filters//2)(_x)
-        _x = kl.MaxPool2D(pool_size=(2, 2), strides=(2, 2))(_x)
-
-        _x = ResidualBottleneck(num_filters//2)(_x)
-        return ResidualBottleneck(num_filters)(_x)
+        return kl.MaxPool2D(pool_size=(2, 2), strides=(2, 2))(_x)
 
     return inner
 
 
-def ResidualBottleneck(num_filters: int):
-    # Residual Bottleneck Layer:
-    # 3 conv
-    # 1 add skip
+def Encoder(num_filters: int):
+    # Encoder layer:
+    # 2 3x3 conv
+    # 1 2x2 max pooling
 
     def inner(x):
-        # Skip layer
-        skip = kl.Conv2D(num_filters,
-                         kernel_size=(1, 1),
-                         padding="same",
-                         activation="relu")(x)
-        # 1st ConvLayer  num_filters -> num_filters/2
-        _x = kl.Conv2D(num_filters//2,
-                       kernel_size=(1, 1),
-                       padding="same",
-                       activation="relu")(x)
-        _x = kl.BatchNormalization()(_x)
-        # 2nd ConvLayer num_filters/2 -> num_filters/4
-        _x = kl.Conv2D(num_filters//2,
-                       kernel_size=(3, 3),
-                       padding="same",
-                       activation="relu")(_x)
-        _x = kl.BatchNormalization()(_x)
-        # 3rd ConvLayer num_filters/4 -> num_filters/4
         _x = kl.Conv2D(num_filters,
-                       kernel_size=(1, 1),
+                       (3, 3),
                        padding="same",
-                       activation="relu")(_x)
-        _x = kl.BatchNormalization()(_x)
-        return kl.Add()([skip, _x])
+                       activation="relu",
+                       data_format="channels_last")(x)
+        _x = kl.Conv2D(num_filters,
+                       (3, 3),
+                       padding="same",
+                       activation="relu",
+                       data_format="channels_last")(_x)
+        return kl.MaxPooling2D((2, 2), strides=(2, 2), data_format="channels_last")(_x)
 
     return inner
 
 
-def LeftHalf(num_filters: int):
-    # Left half layers for hourglass module
-    # f1, f2, f4 , f8 : 1, 1/2, 1/4 1/8 resolution
+def Bottleneck(num_filters: int, dim: Tuple[int, int]):
+    # Residual Bottleneck Layer:
+    # 1 conv height//4 x width//4
+    # 1 conv 1x1
 
     def inner(x):
-        f1 = ResidualBottleneck(num_filters)(x)
-        _x = kl.MaxPool2D(pool_size=(2, 2), strides=(2, 2))(f1)
-
-        f2 = ResidualBottleneck(num_filters)(_x)
-        _x = kl.MaxPool2D(pool_size=(2, 2), strides=(2, 2))(f2)
-
-        f4 = ResidualBottleneck(num_filters)(_x)
-        _x = kl.MaxPool2D(pool_size=(2, 2), strides=(2, 2))(f4)
-
-        f8 = ResidualBottleneck(num_filters)(_x)
-
-        return (f1, f2, f4, f8)
+        _x = kl.Conv2D(num_filters,
+                       (dim[0]//4, dim[1]//4),
+                       padding="same",
+                       activation="relu",
+                       data_format="channels_last")(x)
+        return kl.Conv2D(num_filters,
+                         (1, 1),
+                         padding="same",
+                         activation="relu",
+                         data_format="channels_last")(_x)
 
     return inner
 
 
-def RightHalf(num_filters):
+def LeftHalf(num_filters: int, dim: Tuple[int, int]):
+    # Left half layers for hourglass module
+
+    def inner(x):
+        f1 = Encoder(num_filters//2)(x)
+
+        f2 = Encoder(num_filters)(f1)
+
+        f3 = Bottleneck(num_filters, dim)(f2)
+
+        return (f1, f2, f3)
+
+    return inner
+
+
+def RightHalf(num_filters: int, num_classes: int):
     # Right half layers for hourglass module
 
     def inner(x):
-        lf1, lf2, lf4, lf8 = x
-        rf8 = ResidualBottleneck(num_filters)(lf8)
-        rf4 = Connect(num_filters)(lf4, rf8)
-        rf2 = Connect(num_filters)(lf2, rf4)
-        return Connect(num_filters)(lf1, rf2)
+        lf1, _, _x = x
+        rf1 = kl.Conv2DTranspose(num_filters//2,
+                                 (2, 2),
+                                 strides=(2, 2),
+                                 use_bias=False,
+                                 data_format="channels_last")(_x)
+        _x = kl.Add()([rf1, lf1])
+        return kl.Conv2DTranspose(num_classes,
+                                  (2, 2),
+                                  strides=(2, 2),
+                                  use_bias=False,
+                                  data_format="channels_last")(_x)
 
     return inner
 
 
-def Connect(num_filters):
-    # Connection layer of left feature to right feature
-    # left  -> 1 ResidualBottleneck
-    # right -> Upsampling
-    # Add   -> left + right
+def Output(num_classes: int, dim_out: Tuple[int, int]):
 
-    def inner(left, right):
-        _xleft = ResidualBottleneck(num_filters)(left)
-        _xright = kl.UpSampling2D()(right)
-        add = kl.Add()([_xleft, _xright])
-        return ResidualBottleneck(num_filters)(add)
-
-    return inner
-
-
-def Output(num_classes, num_filters):
-
-    def inner(pf, rf1):
-        # two head, one head to next stage, one head to intermediate features
-        out = kl.Conv2D(num_filters,
-                        kernel_size=(1, 1),
-                        padding="same",
-                        activation="relu")(rf1)
-        out = kl.BatchNormalization()(out)
-
-        # for out as intermediate supervision, use 'linear' as activation.
-        out_parts = kl.Conv2D(num_classes,
-                              kernel_size=(1, 1),
-                              padding="same",
-                              activation="linear")(out)
-
-        # use linear activation
-        out = kl.Conv2D(num_filters,
-                        kernel_size=(1, 1),
-                        padding="same",
-                        activation="linear")(out)
-        out_m = kl.Conv2D(num_filters,
-                          kernel_size=(1, 1),
-                          padding="same",
-                          activation="linear")(out_parts)
-
-        out_next_stage = kl.Add()([out, out_m, pf])
-        return out_next_stage, out_parts
+    def inner(x):
+        return kl.Reshape((dim_out[1] * dim_out[0] * num_classes, 1))(x)
 
     return inner
